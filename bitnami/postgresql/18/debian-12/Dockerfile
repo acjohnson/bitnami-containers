@@ -7,15 +7,18 @@ ARG DOWNLOADS_URL="downloads.bitnami.com/files/stacksmith"
 ARG EXTRA_LOCALES
 ARG TARGETARCH
 ARG WITH_ALL_LOCALES="no"
+ARG PG_MAJOR=18
+ARG PGVECTOR_TAG=0.8.1
+ARG VECTORCHORD_TAG=0.5.3
 
 LABEL org.opencontainers.image.base.name="docker.io/bitnami/minideb:bookworm" \
       org.opencontainers.image.created="2026-01-11T12:13:33Z" \
-      org.opencontainers.image.description="Application packaged by Broadcom, Inc." \
+      org.opencontainers.image.description="Application packaged by Broadcom, Inc. with VectorChord extensions" \
       org.opencontainers.image.documentation="https://github.com/bitnami/containers/tree/main/bitnami/postgresql/README.md" \
       org.opencontainers.image.source="https://github.com/bitnami/containers/tree/main/bitnami/postgresql" \
       org.opencontainers.image.title="postgresql" \
       org.opencontainers.image.vendor="Broadcom, Inc." \
-      org.opencontainers.image.version="18.1.0"
+      org.opencontainers.image.version="18.1.0-vectorchord${VECTORCHORD_TAG}"
 
 ENV HOME="/" \
     OS_ARCH="${TARGETARCH:-amd64}" \
@@ -49,11 +52,43 @@ RUN find / -perm /6000 -type f -exec chmod a-s {} \; || true
 RUN update-locale LANG=C.UTF-8 LC_MESSAGES=POSIX && \
     DEBIAN_FRONTEND=noninteractive dpkg-reconfigure locales && \
     echo 'en_US.UTF-8 UTF-8' >> /etc/locale.gen
+
+# Build and install pgvector from source
+RUN install_packages wget make gcc libc6-dev && \
+    export PG_CONFIG=/opt/bitnami/postgresql/bin/pg_config && \
+    wget -nv -O /tmp/pgvector.tar.gz "https://github.com/pgvector/pgvector/archive/refs/tags/v${PGVECTOR_TAG}.tar.gz" && \
+    tar -xzf /tmp/pgvector.tar.gz -C /tmp && \
+    cd /tmp/pgvector-${PGVECTOR_TAG} && \
+    make && make install && \
+    rm -rf /tmp/pgvector* && \
+    apt-get purge -y --auto-remove make gcc libc6-dev && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Install VectorChord extension from pre-built .deb package
+RUN install_packages wget && \
+    ARCH=${TARGETARCH:-amd64} && \
+    wget -nv -O /tmp/vchord.deb "https://github.com/tensorchord/VectorChord/releases/download/${VECTORCHORD_TAG}/postgresql-${PG_MAJOR}-vchord_${VECTORCHORD_TAG}-1_${ARCH}.deb" && \
+    mkdir -p /tmp/deb-extract && \
+    cd /tmp/deb-extract && \
+    dpkg-deb -x /tmp/vchord.deb . && \
+    find . -name "*.so" -exec cp {} /opt/bitnami/postgresql/lib/ \; && \
+    find . -name "*.control" -exec cp {} /opt/bitnami/postgresql/share/extension/ \; && \
+    find . -name "*.sql" -exec cp {} /opt/bitnami/postgresql/share/extension/ \; && \
+    cd / && \
+    rm -rf /tmp/deb-extract /tmp/vchord.deb && \
+    uninstall_packages wget
+
 RUN /opt/bitnami/scripts/locales/generate-locales.sh
 RUN uninstall_packages curl
 
 COPY rootfs /
 RUN /opt/bitnami/scripts/postgresql/postunpack.sh
+
+# Configure PostgreSQL to preload vector extensions
+RUN mkdir -p /opt/bitnami/postgresql/conf && \
+    echo "shared_preload_libraries = 'vchord.so'" >> /opt/bitnami/postgresql/conf/postgresql.conf.sample && \
+    echo "search_path = '\"\$user\", public'" >> /opt/bitnami/postgresql/conf/postgresql.conf.sample
+
 ENV APP_VERSION="18.1.0" \
     BITNAMI_APP_NAME="postgresql" \
     IMAGE_REVISION="5" \
